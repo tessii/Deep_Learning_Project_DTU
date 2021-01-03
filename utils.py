@@ -92,10 +92,10 @@ def init_weights(net, init_method="Xavier"):
     if type(net)== nn.Linear:
         if init_method == "Xavier":
             torch.nn.init.xavier_uniform_(net.weight)
-            net.bias.data.fill_(0.01)
+            net.bias.data.zero_()
         elif init_method == "Kaiming-He":
             torch.nn.init.kaiming_uniform_(net.weight)
-            net.bias.data.fill_(0.01)
+            net.bias.data.zero_()
 
 import torch
 import numpy as np
@@ -176,7 +176,8 @@ def test(model,dataloader,cuda_available:bool,test_data:defaultdict,verbose=True
     
     pass
 
-def training_M2(model, dataloader_labelled, dataloader_unlabelled, optimizer, alpha:float, cuda_available:bool, training_data:defaultdict, training_data_labelled:defaultdict, training_data_unlabelled:defaultdict, verbose=True):
+
+def training_M2(model, dataloader_labelled, dataloader_unlabelled, optimizer, cuda_available:bool, training_data:defaultdict, training_data_labelled:defaultdict, training_data_unlabelled:defaultdict, verbose=True):
     from itertools import cycle
     import torch.nn.functional as F
     #init 
@@ -187,6 +188,7 @@ def training_M2(model, dataloader_labelled, dataloader_unlabelled, optimizer, al
     loss_class=0
     running_loss=0  
     model.train()
+
     # Go through both labelled and unlabelled data
     for i, ((x, y), (u, _))  in enumerate(zip(cycle(dataloader_labelled), dataloader_unlabelled)):
 
@@ -197,27 +199,35 @@ def training_M2(model, dataloader_labelled, dataloader_unlabelled, optimizer, al
         # Send labelled data through autoencoder
         loss_labelled, diagnostics_labelled, _, _ = model(x, y)
         loss_unlabelled, diagnostics_unlabelled, _, _ = model(u)
-        classifier_loss = F.cross_entropy(model.classifier(x),y)
+        output = model.classifier(x)
+        
+        
 
-        loss =  loss_unlabelled  +  alpha*classifier_loss + loss_labelled 
+        loss =  loss_unlabelled + loss_labelled 
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()  
+        loss.backward()       
+        optimizer.step()
+
         
         ##diagnostic VAE batch
+
         for k, v in diagnostics_labelled.items():
-            training_epoch_data_labelled[k] += [v.mean().item()]
+            if k == "classifier_loss":
+                training_epoch_data_labelled[k] += [v]
+            else:
+                training_epoch_data_labelled[k] += [v.mean().item()]
+
+
         for k, v in diagnostics_unlabelled.items():            
             training_epoch_data_unlabelled[k] += [v.mean().item()]
 
         ##diagnostic classifier batch
-        output = model.classify(x)        
         _, predicted = torch.max(output.data, 1)
         total += y.size(0)
         correct += (predicted == y).sum()
         
-        loss_class += classifier_loss.item()
+        # loss_class += classifier_loss.item()
         running_loss += loss.item()
     
     ##diagnostic VAE epoch
@@ -235,22 +245,19 @@ def training_M2(model, dataloader_labelled, dataloader_unlabelled, optimizer, al
     
     if verbose:
         print("Trainig :")
-        print("Labelled, elbo(L) : {}, BCE : {}, KL : {}".format(round(training_data_labelled["elbo"][-1],3),
+        print("Labelled, elbo(L) : {}, BCE : {}, KL : {}, Classifier loss : {},".format(round(training_data_labelled["elbo"][-1],3),
                                                                  round(training_data_labelled["likelihood"][-1],3),
-                                                                 round(training_data_labelled["KL"][-1], 4)))
+                                                                 round(training_data_labelled["KL"][-1], 4),
+                                                                 round(training_data_labelled["classifier_loss"][-1], 7)))
     
         print("Unlabelled; elbo(U) : {}, BCE : {}, KL : {}, H : {}".format(round(training_data_unlabelled["elbo"][-1],3),
                                                                            round(training_data_unlabelled["likelihood"][-1],3),
                                                                            round(training_data_unlabelled["KL"][-1], 4),
                                                                            round(training_data_unlabelled["Entropy H"][-1],3)))
         
-        print("Total loss : {}, Classifier loss : {}, Classifier accuracy : {}".format(round(training_data["Tot_loss"][-1],3),
-                                                                                       round(training_data["classifier_loss"][-1],3),
-                                                                                       round(training_data["classifier_accuracy"][-1], 2)))
-    
-    pass
+        print("Total loss : {},  Classifier accuracy : {}".format(round(training_data["Tot_loss"][-1],3), round(training_data["classifier_accuracy"][-1], 3)))
 
-def training_M2_v2(model, dataloader_labelled, dataloader_unlabelled, optimizer, alpha:float, cuda_available:bool, training_data:defaultdict, training_data_labelled:defaultdict, training_data_unlabelled:defaultdict, verbose=True):
+def training_M2_v2(model, dataloader_labelled, dataloader_unlabelled, optimizer, frequency:int, cuda_available:bool, training_data:defaultdict, training_data_labelled:defaultdict, training_data_unlabelled:defaultdict, verbose=True):
     from itertools import cycle
     import torch.nn.functional as F
     #init 
@@ -263,8 +270,8 @@ def training_M2_v2(model, dataloader_labelled, dataloader_unlabelled, optimizer,
     steps_unlabelled = len(dataloader_unlabelled)
     steps_labelled = len(dataloader_labelled)
     batches_per_epoch = steps_labelled + steps_unlabelled
-    periodic_interval_batches = steps_unlabelled // steps_labelled
-    
+    periodic_interval_batches = int(frequency)
+
     if cuda_available:
         model.cuda()
     
@@ -274,8 +281,8 @@ def training_M2_v2(model, dataloader_labelled, dataloader_unlabelled, optimizer,
     for i in range(batches_per_epoch):
 
         # whether this batch is supervised or not
-        is_supervised = (i % periodic_interval_batches == 1) and batch_labelled_proc < steps_labelled
-
+        is_supervised = (i % periodic_interval_batches == 1) #and batch_labelled_proc < steps_labelled
+        
         # extract the corresponding batch
         if is_supervised:
             x, y = next(iter(dataloader_labelled))
@@ -283,24 +290,24 @@ def training_M2_v2(model, dataloader_labelled, dataloader_unlabelled, optimizer,
                 x, y = x.cuda(), y.cuda()
                 model.cuda()
             loss_labelled, diagnostics_labelled, _, _ = model(x, y)
-            classifier_loss = F.cross_entropy(model.classifier(x),y)
+            output = model.classifier(x)
             
-            loss =   alpha*classifier_loss + loss_labelled
+            loss = loss_labelled
+
             batch_labelled_proc += 1
 
             for k, v in diagnostics_labelled.items():
-                training_epoch_data_labelled[k] += [v.mean().item()]
+                if k == "classifier_loss":
+                    training_epoch_data_labelled[k] += [v]
+                else:
+                    training_epoch_data_labelled[k] += [v.mean().item()]
+
 
             ##diagnostic classifier batch
-            output = model.classify(x)
-            
-            
-
             _, predicted = torch.max(output.data, 1)
             total += y.size(0)
             correct += (predicted == y).sum()
             
-            loss_class += classifier_loss.item()
             running_loss += loss.item()
 
         else:
@@ -318,10 +325,9 @@ def training_M2_v2(model, dataloader_labelled, dataloader_unlabelled, optimizer,
         
         #backward step
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()  
-        
-        
+        loss.backward()        
+        optimizer.step()
+
 
     ##diagnostic VAE epoch
     for k, v in training_epoch_data_labelled.items():
@@ -332,36 +338,34 @@ def training_M2_v2(model, dataloader_labelled, dataloader_unlabelled, optimizer,
     
     
     ##diagnostic model epoch
-    training_data["Tot_loss"] += [running_loss /batches_per_epoch]
-    training_data["classifier_loss"] += [loss_class / steps_labelled]
+    training_data["Tot_loss"] += [running_loss / i+1]
     training_data["classifier_accuracy"] += [100 * correct.true_divide(total).item()]
     
     if verbose:
         print("Trainig :")
-        print("Labelled, elbo(L) : {}, BCE : {}, KL : {}".format(round(training_data_labelled["elbo"][-1],3),
+        print("Labelled, elbo(L) : {}, BCE : {}, KL : {}, Classifier loss : {},".format(round(training_data_labelled["elbo"][-1],3),
                                                                  round(training_data_labelled["likelihood"][-1],3),
-                                                                 round(training_data_labelled["KL"][-1], 4)))
+                                                                 round(training_data_labelled["KL"][-1], 4),
+                                                                 round(training_data_labelled["classifier_loss"][-1], 7)))
     
         print("Unlabelled; elbo(U) : {}, BCE : {}, KL : {}, H : {}".format(round(training_data_unlabelled["elbo"][-1],3),
                                                                            round(training_data_unlabelled["likelihood"][-1],3),
                                                                            round(training_data_unlabelled["KL"][-1], 4),
                                                                            round(training_data_unlabelled["Entropy H"][-1],3)))
         
-        print("Total loss : {}, Classifier loss : {}, Classifier accuracy : {}".format(round(training_data["Tot_loss"][-1],3),
-                                                                                       round(training_data["classifier_loss"][-1],3),
-                                                                                       round(training_data["classifier_accuracy"][-1], 2)))
-    
-    pass
+        print("Total loss : {},  Classifier accuracy : {}".format(round(training_data["Tot_loss"][-1],3), round(training_data["classifier_accuracy"][-1], 2)))
 
 
-def test_M2(model,dataloader,alpha, cuda_available:bool,test_data:defaultdict, verbose=True):
+
+
+def test_M2(model,dataloader, alpha, cuda_available:bool,test_data:defaultdict, verbose=True):
     import torch.nn.functional as F
     #init
-    testing_epoch_data = defaultdict(list)
     running_loss = 0
     correct = 0
     total = 0
     loss_class=0
+    saved = False
     with torch.no_grad():
         model.eval()
         for i, (input,target) in enumerate(dataloader):
@@ -371,28 +375,37 @@ def test_M2(model,dataloader,alpha, cuda_available:bool,test_data:defaultdict, v
                 target = target.cuda()
             
             loss_lab , _, _, _ = model(input,target)
-            loss_unlab, _,_,_, = model(input) 
-            classifier_loss = F.cross_entropy(model.classifier(input),target)
+            loss_unlab, _,_,_, = model(input)
+            
+            output = model.classifier(input)
+            classifier_loss = F.cross_entropy(output,target)
+
             loss_class += classifier_loss.item()
             loss = loss_lab + alpha* classifier_loss + loss_unlab
 
-            output = F.softmax(model.classifier(input),dim=1)
             _, predicted = torch.max(output.data, 1)
             total += target.size(0)
             correct += (predicted == target).sum()
       
             running_loss += loss.item()
         
+        try: max_acc = max(test_data["test_accuracy"])
+        except : max_acc = 0
+
         test_data["Tot_loss"] += [running_loss / i+1]
         test_data["classifier_loss"] += [loss_class / i+1]
         test_data["test_accuracy"] += [100*correct.true_divide(total).item()]
    
-    
+        current_acc = test_data["test_accuracy"][-1] 
+        if current_acc >= max_acc:
+            torch.save(model.classifier.state_dict(),"./state_dict_classifier.pt")
+            max_acc = current_acc
+            saved = True
+
     if verbose: 
         print("Test :")
         print("Tot loss : {}, Classifier loss : {}, Classifier accuracy : {}".format(round(test_data["Tot_loss"][-1],3),
                                                                                      round(test_data["classifier_loss"][-1],3),
                                                                                      round(test_data["test_accuracy"][-1], 2)))
-    pass
-
-
+        if saved:
+            print(f"Saved Checkpoint with accuracy {max_acc}")     
